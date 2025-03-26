@@ -1,3 +1,4 @@
+#include <Python.h>
 #include "filemanagementwidget.h"
 #include "Databasemanagement.h"
 #include <QVBoxLayout>
@@ -22,14 +23,23 @@
 #include <QEventLoop>
 #include <QCoreApplication>
 #include <QThread>
+#include <vector>
+#include <string>
 
 FileManagementWidget::FileManagementWidget(QWidget *parent) : QWidget(parent)
 {
     setupUI();
+    // 初始化Python解释器
+    Py_Initialize();
 }
 
 FileManagementWidget::~FileManagementWidget()
 {
+    if(Py_IsInitialized())
+    {
+        Py_Finalize();
+        qDebug() << "成功终止python解释器";
+    }
 }
 
 void FileManagementWidget::setCurrentUser(const User &user)
@@ -755,10 +765,113 @@ void FileManagementWidget::organizeDocuments()
     }
     
     // 合并文档并添加目录
-    mergeDocuments(selectedDocs);
+    mergeDocumentsByPython(selectedDocs);
 }
 
 // 合并文档并添加目录
+void FileManagementWidget::mergeDocumentsByPython(const QVector<FileInfo>& documents)
+{
+    if(documents.empty()) {
+        QMessageBox::warning(this, "错误", "没有可合并的文档");
+        return;
+    }
+
+    // 让用户选择保存位置
+    QString saveFilePath = QFileDialog::getSaveFileName(
+        this,
+        "保存合并后的文档",
+        QDir::homePath() + "/合并文档.docx",
+        "Word文档 (*.docx);;所有文件 (*.*)");
+
+    if(saveFilePath.isEmpty()) {
+        // 用户取消了保存对话框
+        return;
+    }
+
+    // 确保文件扩展名为.docx
+    if(!saveFilePath.endsWith(".docx", Qt::CaseInsensitive)) {
+        saveFilePath += ".docx";
+    }
+
+    // 获取当前应用程序路径
+    QString appDirPath = QCoreApplication::applicationDirPath();
+
+    // 构建Python脚本路径 - 更新为实际位置
+    QString pythonScriptDir = appDirPath + "/main.py";
+
+    QVector<QString> combineFiles;
+    for(auto &file : documents)
+    {
+        QString inputFile = file.filePath;
+        qDebug() << "合并文件路径：" << inputFile;
+        combineFiles.emplace_back(inputFile);
+    }
+
+    if(!Py_IsInitialized())
+    {
+        QMessageBox::warning(this, "错误", "无法初始化python解释器");
+        return;
+    }
+
+    try
+    {
+        PyObject* pModule = PyImport_ImportModule("main");
+        if(!pModule)
+        {
+            QMessageBox::warning(this, "错误", "无法导入python模块");
+            PyErr_Print();
+            Py_Finalize();
+            return;
+        }
+
+        // 获取函数对象
+        PyObject* pFunc = PyObject_GetAttrString(pModule, "merge_documents");
+        if(!pFunc || !PyCallable_Check(pFunc))
+        {
+            QMessageBox::warning(this, "错误", "无法找到函数‘merge_documents’");
+            Py_XDECREF(pFunc);
+            Py_DECREF(pModule);
+            Py_Finalize();
+            return;
+        }
+
+        PyObject* pInputFiles = PyList_New(combineFiles.size());
+        int index = 0;
+        for(auto &file : combineFiles)
+        {
+            PyObject* pFile = PyUnicode_FromString(file.toStdString().c_str());
+            PyList_SetItem(pInputFiles, index++, pFile);
+        }
+
+        PyObject* pOutputFile = PyUnicode_FromString(saveFilePath.toStdString().c_str());
+
+        PyObject* pArgs = PyTuple_New(2);
+        PyTuple_SetItem(pArgs, 0, pInputFiles);
+        PyTuple_SetItem(pArgs, 1, pOutputFile);
+
+        PyObject* pResult = PyObject_CallObject(pFunc, pArgs);
+        if(!pResult)
+        {
+            QMessageBox::warning(this, "错误", "python函数调用失败");
+        }
+
+        Py_XDECREF(pResult);
+        Py_DECREF(pArgs);
+        Py_DECREF(pFunc);
+        Py_DECREF(pModule);
+    }
+    catch(const std::exception &e)
+    {
+        QMessageBox::warning(this, "错误", "发生异常：%1", e.what());
+    }
+    catch(...)
+    {
+        QMessageBox::warning(this, "错误", "发生未知异常");
+    }
+
+    QMessageBox::information(this, "提醒", "文档合并成功，打开word文档后，选择更新域以手动更新目录");
+}
+
 void FileManagementWidget::mergeDocuments(const QVector<FileInfo>& documents)
 {
     if(documents.empty()) {
@@ -878,7 +991,7 @@ void FileManagementWidget::mergeDocuments(const QVector<FileInfo>& documents)
                 
                 if(attempt >= MAX_ATTEMPTS) {
                     throw QString("尝试启动Word失败，请检查您的Microsoft Office安装");
-                }
+                }   
                 
                 progress.setLabelText(QString("Word初始化失败，正在重试 (尝试 %1/%2)...").arg(attempt + 1).arg(MAX_ATTEMPTS));
                 QCoreApplication::processEvents();

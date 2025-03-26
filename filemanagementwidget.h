@@ -42,9 +42,7 @@ private:
     void organizeDocuments();
     void mergeDocuments(const QVector<FileInfo>& documents);
     void insertTableOfContents(QAxObject* wordDocument);
-    
-    // 创建简单的合并文档（用于没有安装Office的情况）
-    void createSimpleMergedDocument(const QVector<FileInfo>& documents, const QString& saveFilePath, QProgressDialog& progress);
+    void mergeDocumentsByPython(const QVector<FileInfo>& documents);
 
 private:
     User _currentUser;
