@@ -66,7 +66,9 @@ public:
 
     // 项目文件关联相关方法
     bool AssignFilesToProject(int projectId, const QVector<int>& fileIds);
+    bool AssignFilesToNode(int nodeId, const QVector<int>& fileIds);
     QVector<FileInfo> GetProjectFiles(int projectId, FileStatus status = FileStatus::NORMAL);
+    QVector<FileInfo> GetNodeFiles(int nodeId, FileStatus status = FileStatus::NORMAL);
 
 private:
     explicit DataBaseManagement(QObject* parent = nullptr);
@@ -78,6 +80,7 @@ private:
     bool CreateProjectNodeTable();
     bool CreateProjectUserTable();
     bool CreateProjectFileTable();
+    bool CreateNodeFileTable();
 
     bool InsertDefaultData();
 

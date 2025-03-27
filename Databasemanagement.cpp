@@ -58,33 +58,39 @@ bool DataBaseManagement::CreateTables()
         return false;
     }
         
-    if (!CreateProjectTable())
-    {
-        qDebug() << "创建项目表失败";
-        return false;
-    }
-    
-    if (!CreateProjectUserTable())
-    {
-        qDebug() << "创建项目用户关联表失败";
-        return false;
-    }
-
-    if (!CreateProjectNodeTable())
-    {
-        qDebug() << "创建项目节点表失败";
-        return false;
-    }
-        
     if (!CreateFileTable())
     {
         qDebug() << "创建文件表失败";
         return false;
     }
     
+    if (!CreateProjectTable())
+    {
+        qDebug() << "创建项目表失败";
+        return false;
+    }
+    
+    if (!CreateProjectNodeTable())
+    {
+        qDebug() << "创建项目节点表失败";
+        return false;
+    }
+        
+    if (!CreateProjectUserTable())
+    {
+        qDebug() << "创建项目用户关联表失败";
+        return false;
+    }
+    
     if (!CreateProjectFileTable())
     {
         qDebug() << "创建项目文件关联表失败";
+        return false;
+    }
+    
+    if (!CreateNodeFileTable())
+    {
+        qDebug() << "创建node_file表失败";
         return false;
     }
     
@@ -224,6 +230,24 @@ bool DataBaseManagement::CreateProjectFileTable()
     }
 
     return true;
+}
+
+bool DataBaseManagement::CreateNodeFileTable()
+{
+    QSqlQuery query(_db);
+    bool success = query.exec("CREATE TABLE IF NOT EXISTS node_file ( "
+                           "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                           "node_id INTEGER NOT NULL, "
+                           "file_id INTEGER NOT NULL, "
+                           "FOREIGN KEY (node_id) REFERENCES project_nodes (id) ON DELETE CASCADE, "
+                           "FOREIGN KEY (file_id) REFERENCES files (id) ON DELETE CASCADE"
+                           ")");
+    
+    if(!success) {
+        qDebug() << "Failed to create node_file table: " << query.lastError().text();
+    }
+    
+    return success;
 }
 
 bool DataBaseManagement::InsertDefaultData()
@@ -991,4 +1015,65 @@ bool DataBaseManagement::UpdateProjectFiles(int projectId, const QVector<int>& f
     }
 
     return success;
+}
+
+bool DataBaseManagement::AssignFilesToNode(int nodeId, const QVector<int>& fileIds)
+{
+    // 首先删除该节点已有的关联关系
+    QSqlQuery query(_db);
+    query.prepare("DELETE FROM node_file WHERE node_id = ?");
+    query.addBindValue(nodeId);
+    
+    if(!query.exec()) {
+        qDebug() << "Failed to delete existing node-file relationships: " << query.lastError().text();
+        return false;
+    }
+    
+    // 添加新的关联关系
+    for(int fileId : fileIds) {
+        query.prepare("INSERT INTO node_file (node_id, file_id) VALUES (?, ?)");
+        query.addBindValue(nodeId);
+        query.addBindValue(fileId);
+        
+        if(!query.exec()) {
+            qDebug() << "Failed to assign file to node: " << query.lastError().text();
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+QVector<FileInfo> DataBaseManagement::GetNodeFiles(int nodeId, FileStatus status)
+{
+    QVector<FileInfo> files;
+    QSqlQuery query(_db);
+    
+    // 联合查询获取节点关联的文件信息
+    query.prepare("SELECT f.id, f.file_name, f.file_path, f.uploader_id, u.username, f.upload_time, f.file_type, f.status "
+                 "FROM files f "
+                 "INNER JOIN node_file nf ON f.id = nf.file_id "
+                 "LEFT JOIN users u ON f.uploader_id = u.id "
+                 "WHERE nf.node_id = ? AND f.status = ?");
+    query.addBindValue(nodeId);
+    query.addBindValue(static_cast<int>(status));
+    
+    if(query.exec()) {
+        while(query.next()) {
+            FileInfo file;
+            file.id = query.value(0).toInt();
+            file.fileName = query.value(1).toString();
+            file.filePath = query.value(2).toString();
+            file.uploaderId = query.value(3).toInt();
+            file.uploaderName = query.value(4).toString();
+            file.uploadTime = query.value(5).toDateTime();
+            file.fileType = static_cast<FileType>(query.value(6).toInt());
+            file.status = static_cast<FileStatus>(query.value(7).toInt());
+            files.append(file);
+        }
+    } else {
+        qDebug() << "Failed to get node files: " << query.lastError().text();
+    }
+    
+    return files;
 }

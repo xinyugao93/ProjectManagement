@@ -222,8 +222,8 @@ void ProjectManagementWidget::setupProjectDetailView()
     docsLayout->addLayout(docButtonLayout);
     
     _projectDocsTable = new QTableWidget();
-    _projectDocsTable->setColumnCount(4);
-    _projectDocsTable->setHorizontalHeaderLabels({"ID", "文档名称", "上传者", "上传时间"});
+    _projectDocsTable->setColumnCount(5);
+    _projectDocsTable->setHorizontalHeaderLabels({"ID", "文档名称", "上传者", "关联节点",  "上传时间"});
     _projectDocsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     _projectDocsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     _projectDocsTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -391,17 +391,29 @@ void ProjectManagementWidget::loadProjectDetail(int projectId)
     
     // 加载项目文档
     _projectDocsTable->setRowCount(0);
-    // 使用GetProjectFiles获取项目的所有文件（通过project_file关联表）
-    QVector<FileInfo> projectFiles = DataBaseManagement::Instance()->GetProjectFiles(projectId);
-    
-    for(const FileInfo& file : projectFiles) {
-        int row = _projectDocsTable->rowCount();
-        _projectDocsTable->insertRow(row);
+
+    // 需要遍历所有项目节点，获取每个节点关联的文件
+    QSet<int> loadedFileIds; // 用于避免重复添加相同的文件
+    for(const ProjectNode& node : nodes) {
+        QVector<FileInfo> nodeFiles = DataBaseManagement::Instance()->GetNodeFiles(node.id);
         
-        _projectDocsTable->setItem(row, 0, new QTableWidgetItem(QString::number(file.id)));
-        _projectDocsTable->setItem(row, 1, new QTableWidgetItem(file.fileName));
-        _projectDocsTable->setItem(row, 2, new QTableWidgetItem(file.uploaderName));
-        _projectDocsTable->setItem(row, 3, new QTableWidgetItem(file.uploadTime.toString("yyyy-MM-dd HH:mm")));
+        for(const FileInfo& file : nodeFiles) {
+            // 如果该文件已经添加过，则跳过
+            if(loadedFileIds.contains(file.id)) {
+                continue;
+            }
+            
+            int row = _projectDocsTable->rowCount();
+            _projectDocsTable->insertRow(row);
+            
+            _projectDocsTable->setItem(row, 0, new QTableWidgetItem(QString::number(file.id)));
+            _projectDocsTable->setItem(row, 1, new QTableWidgetItem(file.fileName));
+            _projectDocsTable->setItem(row, 2, new QTableWidgetItem(file.uploaderName));
+            _projectDocsTable->setItem(row, 3, new QTableWidgetItem(node.name));
+            _projectDocsTable->setItem(row, 4, new QTableWidgetItem(file.uploadTime.toString("yyyy-MM-dd HH:mm")));
+            
+            loadedFileIds.insert(file.id);
+        }
     }
     
     // 更新按钮权限
@@ -1108,28 +1120,45 @@ void ProjectManagementWidget::onAddDocument()
         return;
     }
     
+    // 首先检查项目是否有节点
+    QVector<ProjectNode> projectNodes = DataBaseManagement::Instance()->GetProjectNodes(_currentProject.id);
+    if(projectNodes.isEmpty()) {
+        QMessageBox::warning(this, "无法添加文档", "该项目还没有创建任何节点，请先创建项目节点。");
+        return;
+    }
+    
     // 显示可用文档的对话框
     QDialog dialog(this);
-    dialog.setWindowTitle("添加文档到项目");
+    dialog.setWindowTitle("添加文档到项目节点");
     dialog.setMinimumWidth(600);
     
     QVBoxLayout* layout = new QVBoxLayout(&dialog);
     
-    // 获取所有文件，过滤出未分配给当前项目的文档
-    QVector<FileInfo> allFiles = DataBaseManagement::Instance()->GetAllFiles();
-    // 获取已关联到项目的文件
-    QVector<FileInfo> projectFiles = DataBaseManagement::Instance()->GetProjectFiles(_currentProject.id);
+    // 添加节点选择下拉框
+    QFormLayout* formLayout = new QFormLayout();
+    QComboBox* nodeComboBox = new QComboBox();
+    for(const ProjectNode& node : projectNodes) {
+        nodeComboBox->addItem(node.name, node.id);
+    }
+    formLayout->addRow("选择项目节点:", nodeComboBox);
+    layout->addLayout(formLayout);
     
-    // 创建一个集合存储已关联文件的ID，方便快速查找
-    QSet<int> projectFileIds;
-    for (const FileInfo& file : projectFiles) {
-        projectFileIds.insert(file.id);
+    // 获取所有文件
+    QVector<FileInfo> allFiles = DataBaseManagement::Instance()->GetAllFiles();
+    
+    // 创建已关联文件ID集合，过滤掉已经绑定的文件
+    QSet<int> nodeFileIds;
+    // 获取所选节点的文件ID，使用当前选择的第一个节点
+    int currentNodeId = nodeComboBox->currentData().toInt();
+    QVector<FileInfo> nodeFiles = DataBaseManagement::Instance()->GetNodeFiles(currentNodeId);
+    for(const FileInfo& file : nodeFiles) {
+        nodeFileIds.insert(file.id);
     }
     
     QVector<FileInfo> availableFiles;
-    // 过滤出未分配给项目或者状态为正常的文件
+    // 过滤出未分配给节点或者状态为正常的文件
     for(const FileInfo& file : allFiles) {
-        if(!projectFileIds.contains(file.id) && file.status == FileStatus::NORMAL) {
+        if(!nodeFileIds.contains(file.id) && file.status == FileStatus::NORMAL) {
             availableFiles.append(file);
         }
     }
@@ -1165,6 +1194,13 @@ void ProjectManagementWidget::onAddDocument()
     layout->addWidget(buttonBox);
     
     if(dialog.exec() == QDialog::Accepted) {
+        // 获取选中的节点ID
+        int nodeId = nodeComboBox->currentData().toInt();
+        if(nodeId <= 0) {
+            QMessageBox::warning(this, "错误", "请选择一个有效的项目节点。");
+            return;
+        }
+        
         // 收集已选择的文档
         QVector<int> selectedFileIds;
         
@@ -1177,12 +1213,14 @@ void ProjectManagementWidget::onAddDocument()
         }
         
         if(!selectedFileIds.isEmpty()) {
-            if(DataBaseManagement::Instance()->AssignFilesToProject(_currentProject.id, selectedFileIds)) {
-                QMessageBox::information(this, "成功", QString("已添加 %1 个文档到项目。").arg(selectedFileIds.size()));
+            if(DataBaseManagement::Instance()->AssignFilesToNode(nodeId, selectedFileIds)) {
+                QMessageBox::information(this, "成功", QString("已添加 %1 个文档到项目节点。").arg(selectedFileIds.size()));
                 loadProjectDetail(_currentProject.id); // 重新加载项目详情以显示更新
             } else {
-                QMessageBox::critical(this, "错误", "添加文档到项目失败。");
+                QMessageBox::critical(this, "错误", "添加文档到项目节点失败。");
             }
+        } else {
+            QMessageBox::warning(this, "提示", "未选择任何文档。");
         }
     }
 }
@@ -1205,21 +1243,67 @@ void ProjectManagementWidget::onRemoveDocument()
     int fileId = _projectDocsTable->item(row, 0)->text().toInt();
     QString fileName = _projectDocsTable->item(row, 1)->text();
     
-    QMessageBox::StandardButton reply = QMessageBox::question(
-        this, "确认移除", 
-        QString("确定要从项目中移除文档 \"%1\" 吗？\n\n注意：这不会删除文档，只会解除与项目的关联。").arg(fileName),
-        QMessageBox::Yes | QMessageBox::No
-    );
+    // 获取所有项目节点
+    QVector<ProjectNode> projectNodes = DataBaseManagement::Instance()->GetProjectNodes(_currentProject.id);
+    if(projectNodes.isEmpty()) {
+        QMessageBox::warning(this, "警告", "该项目没有任何节点。");
+        return;
+    }
     
-    if(reply == QMessageBox::Yes) {
-        // 从project_file表中删除关联关系
-        QSqlQuery query;
-        query.prepare("DELETE FROM project_file WHERE project_id = ? AND file_id = ?");
-        query.addBindValue(_currentProject.id);
-        query.addBindValue(fileId);
+    // 创建对话框，让用户选择从哪个节点移除文档
+    QDialog dialog(this);
+    dialog.setWindowTitle("选择要移除文档的节点");
+    dialog.setMinimumWidth(400);
+    
+    QVBoxLayout* layout = new QVBoxLayout(&dialog);
+    
+    QLabel* label = new QLabel(QString("确定要移除文档 \"%1\" 吗？\n请选择要从中移除文档的节点：").arg(fileName));
+    layout->addWidget(label);
+    
+    QComboBox* nodeComboBox = new QComboBox();
+    for(const ProjectNode& node : projectNodes) {
+        // 检查该节点是否关联了该文档
+        QVector<FileInfo> nodeFiles = DataBaseManagement::Instance()->GetNodeFiles(node.id);
+        bool hasFile = false;
+        for(const FileInfo& file : nodeFiles) {
+            if(file.id == fileId) {
+                hasFile = true;
+                break;
+            }
+        }
         
-        if(query.exec() && query.numRowsAffected() > 0) {
-            QMessageBox::information(this, "成功", "文档已从项目中移除。");
+        if(hasFile) {
+            nodeComboBox->addItem(node.name, node.id);
+        }
+    }
+    
+    if(nodeComboBox->count() == 0) {
+        QMessageBox::warning(this, "警告", "没有任何节点关联了该文档。");
+        return;
+    }
+    
+    layout->addWidget(nodeComboBox);
+    
+    QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttonBox);
+    
+    if(dialog.exec() == QDialog::Accepted) {
+        int nodeId = nodeComboBox->currentData().toInt();
+        
+        // 获取节点当前关联的所有文件
+        QVector<FileInfo> nodeFiles = DataBaseManagement::Instance()->GetNodeFiles(nodeId);
+        QVector<int> fileIds;
+        for(const FileInfo& file : nodeFiles) {
+            if(file.id != fileId) { // 排除要移除的文件
+                fileIds.append(file.id);
+            }
+        }
+        
+        // 更新节点关联的文件
+        if(DataBaseManagement::Instance()->AssignFilesToNode(nodeId, fileIds)) {
+            QMessageBox::information(this, "成功", QString("文档已从节点 %1 中移除。").arg(nodeComboBox->currentText()));
             loadProjectDetail(_currentProject.id);
         } else {
             QMessageBox::warning(this, "警告", "移除文档失败，请稍后重试。");
